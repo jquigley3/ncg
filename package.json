@@ -1,0 +1,32 @@
+{
+  "name": "ncg",
+  "version": "0.1.0",
+  "description": "Transparent dual-mode HTTP proxy with credential injection for sandboxed Claude Code sessions.",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "monitor": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/phase*.test.ts test/injectors.test.ts --test-concurrency=1",
+    "test:integration": "tsx --test test/integration.test.ts",
+    "test:flow": "tsx --test test/flow.test.ts",
+    "test:regression": "tsx --test test/regression.test.ts",
+    "test:e2e": "tsx --test test/e2e.test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3-multiple-ciphers": "^12.6.2",
+    "https-proxy-agent": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
