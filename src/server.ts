@@ -4,12 +4,15 @@ import { ensureDefaultRoutes } from './bootstrap.js';
 import { initDb } from './db.js';
 import { handleForwardProxy } from './forward-proxy.js';
 import { findReverseRoute, handleReverseProxy } from './reverse-proxy.js';
+import { hasPermission, getInjectionForPermission } from './permissions.js';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   createRoute,
   listRoutes,
   deleteRoute,
   updateRoute,
   getRouteByName,
+  getRoute,
 } from './routes.js';
 import {
   grantPermission,
@@ -309,9 +312,12 @@ async function handleApiRoute(req: IncomingMessage, res: ServerResponse): Promis
       try {
         const id = createRoute(body);
         const route = listRoutes().find((r) => r.id === id);
+        if (route?.type === 'port' && route.port !== null) {
+          bindPortRoute(id, route.port);
+        }
         emit('routes:changed');
         res.writeHead(201, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ id, name: route?.name ?? body.name }));
+        res.end(JSON.stringify({ id, name: route?.name ?? body.name, port: route?.port ?? undefined }));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes('already exists')) {
@@ -342,8 +348,12 @@ async function handleApiRoute(req: IncomingMessage, res: ServerResponse): Promis
     }
     if (req.method === 'DELETE' && pathParts[1]) {
       const name = pathParts[1];
+      const existing = getRouteByName(name);
       const ok = deleteRoute(name);
       if (ok) {
+        if (existing?.type === 'port' && existing.port !== null) {
+          unbindPortRoute(existing.port);
+        }
         emit('routes:changed');
         emit('injectors:changed');
         emit('permissions:changed');
@@ -486,9 +496,118 @@ function handleCredentialProxy(req: IncomingMessage, res: ServerResponse): void 
   });
 }
 
+// ── Port-per-service servers ──────────────────────────────────────────────────
+
+let bindHost = '0.0.0.0';
+const portServers = new Map<number, Server>();
+
+function handlePortRequest(req: IncomingMessage, res: ServerResponse, routeId: string): void {
+  const session = identifySession(req);
+  const sessionId = session?.id ?? '*';
+
+  if (!hasPermission(sessionId, routeId)) {
+    json(res, 403, {
+      error: 'no_permission',
+      message: 'Session lacks permission for this route',
+    });
+    return;
+  }
+
+  // Look up route
+  const route = getRoute(routeId);
+  if (!route || !route.upstream_url) {
+    json(res, 500, { error: 'route_not_found' });
+    return;
+  }
+
+  const upstreamBase = new URL(route.upstream_url);
+  const isHttps = upstreamBase.protocol === 'https:';
+  const makeRequest = isHttps ? httpsRequest : httpRequest;
+
+  const chunks: Buffer[] = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const body = Buffer.concat(chunks);
+    const headers: Record<string, string | number | string[] | undefined> = {
+      ...(req.headers as Record<string, string>),
+      host: upstreamBase.host,
+      'content-length': body.length,
+    };
+    delete headers['connection'];
+    delete headers['keep-alive'];
+    delete headers['transfer-encoding'];
+
+    const injection = getInjectionForPermission(sessionId, routeId);
+    if (injection) {
+      (headers as Record<string, string>)[injection.inject_header] = injection.inject_value;
+    }
+
+    const upstreamPort = upstreamBase.port
+      ? parseInt(upstreamBase.port, 10)
+      : isHttps ? 443 : 80;
+
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const agent = (isHttps && proxyUrl) ? new HttpsProxyAgent(proxyUrl) : undefined;
+
+    const upstream = makeRequest(
+      {
+        hostname: upstreamBase.hostname,
+        port: upstreamPort,
+        path: req.url || '/',
+        method: req.method,
+        headers,
+        ...(agent ? { agent } : {}),
+      } as RequestOptions,
+      (upRes) => {
+        res.writeHead(upRes.statusCode!, upRes.headers);
+        upRes.pipe(res);
+      }
+    );
+
+    upstream.on('error', (err) => {
+      console.error(`Port proxy upstream error (route ${routeId}):`, err.message);
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Bad Gateway');
+      }
+    });
+
+    upstream.write(body);
+    upstream.end();
+  });
+}
+
+export function bindPortRoute(routeId: string, port: number): void {
+  if (portServers.has(port)) return; // already bound
+  const server = createServer((req, res) => handlePortRequest(req, res, routeId));
+  server.listen(port, bindHost, () => {
+    console.log(`Port route :${port} → route ${routeId} listening`);
+  });
+  server.on('error', (err) => {
+    console.error(`Port server :${port} error:`, err.message);
+    portServers.delete(port);
+  });
+  portServers.set(port, server);
+}
+
+export function unbindPortRoute(port: number): void {
+  const server = portServers.get(port);
+  if (!server) return;
+  server.close(() => console.log(`Port route :${port} closed`));
+  portServers.delete(port);
+}
+
 export function startServer(port: number, host: string): Promise<{ admin: Server; credential: Server }> {
+  bindHost = host;
   initDb();
   ensureDefaultRoutes();
+
+  // Restore any port routes that were persisted before restart
+  for (const route of listRoutes('port')) {
+    if (route.port !== null) {
+      bindPortRoute(route.id, route.port);
+    }
+  }
 
   const credPort = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10);
 
@@ -519,3 +638,4 @@ if (isMain) {
   const HOST = process.env.HOST || '0.0.0.0';
   startServer(PORT, HOST);
 }
+

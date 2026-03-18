@@ -1,10 +1,11 @@
 export interface Route {
   id: string;
   name: string;
-  type: 'forward' | 'reverse';
+  type: 'forward' | 'reverse' | 'port';
   domain_pattern: string | null;  // forward: regex for domain
   path_prefix: string | null;     // reverse: e.g., '/anthropic'
-  upstream_url: string | null;    // reverse: e.g., 'https://api.anthropic.com'
+  upstream_url: string | null;    // reverse/port: e.g., 'https://api.anthropic.com'
+  port: number | null;            // port: dedicated TCP port on the proxy
   description: string | null;
   created_at: string;
 }

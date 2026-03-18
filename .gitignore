@@ -6,6 +6,5 @@ data/
 *.db-shm
 *.db-wal
 .DS_Store
-docker-sandbox-ca.pem
 test-results/
 playwright-report/

@@ -33,11 +33,12 @@ export function initDb(): void {
     CREATE TABLE IF NOT EXISTS routes (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
-      type TEXT NOT NULL CHECK(type IN ('forward', 'reverse')),
+      type TEXT NOT NULL CHECK(type IN ('forward', 'reverse', 'port')),
 
       domain_pattern TEXT,
       path_prefix TEXT,
       upstream_url TEXT,
+      port INTEGER UNIQUE,
 
       description TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -91,6 +92,7 @@ export function initDb(): void {
   `);
 
   migrateSchema(db);
+  migratePortColumn(db);
 
   console.log(`Database initialized: ${DB_PATH}`);
 }
@@ -134,4 +136,25 @@ function migrateSchema(db: Database.Database): void {
   }
 
   console.log(`Migration: added injector_id to permissions, migrated ${routes.length} route(s) to injectors`);
+}
+
+function migratePortColumn(db: Database.Database): void {
+  const cols = db.prepare("PRAGMA table_info('routes')").all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === 'port')) return;
+  db.exec(`ALTER TABLE routes ADD COLUMN port INTEGER`);
+  console.log('Migration: added port column to routes');
+}
+
+const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START || '4000', 10);
+const PORT_RANGE_END   = parseInt(process.env.PORT_RANGE_END   || '4099', 10);
+
+export function nextAvailablePort(): number {
+  const taken = new Set(
+    (getDb().prepare('SELECT port FROM routes WHERE port IS NOT NULL').all() as Array<{ port: number }>)
+      .map((r) => r.port)
+  );
+  for (let p = PORT_RANGE_START; p <= PORT_RANGE_END; p++) {
+    if (!taken.has(p)) return p;
+  }
+  throw new Error(`No available ports in range ${PORT_RANGE_START}–${PORT_RANGE_END}`);
 }

@@ -1,19 +1,20 @@
 import crypto from 'crypto';
-import { getDb } from './db.js';
+import { getDb, nextAvailablePort } from './db.js';
 import { Route } from './types.js';
 
 export interface CreateRouteInput {
   name: string;
-  type: 'forward' | 'reverse';
+  type: 'forward' | 'reverse' | 'port';
   domain_pattern?: string;
   path_prefix?: string;
   upstream_url?: string;
+  port?: number;
   description?: string;
 }
 
 export function createRoute(input: CreateRouteInput): string {
-  if (input.type !== 'forward' && input.type !== 'reverse') {
-    throw new Error('type must be forward or reverse');
+  if (input.type !== 'forward' && input.type !== 'reverse' && input.type !== 'port') {
+    throw new Error('type must be forward, reverse, or port');
   }
   if (input.type === 'forward') {
     if (!input.domain_pattern) {
@@ -40,23 +41,46 @@ export function createRoute(input: CreateRouteInput): string {
     }
   }
 
+  if (input.type === 'port') {
+    if (!input.upstream_url) {
+      throw new Error('upstream_url is required for port routes');
+    }
+    try {
+      new URL(input.upstream_url);
+    } catch {
+      throw new Error('upstream_url must be a valid URL');
+    }
+    if (input.port !== undefined && (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535)) {
+      throw new Error('port must be an integer between 1 and 65535');
+    }
+  }
+
+  const assignedPort = input.type === 'port'
+    ? (input.port ?? nextAvailablePort())
+    : null;
+
   const id = crypto.randomUUID();
   const db = getDb();
   try {
     db.prepare(
-      `INSERT INTO routes (id, name, type, domain_pattern, path_prefix, upstream_url, description)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO routes (id, name, type, domain_pattern, path_prefix, upstream_url, port, description)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       input.name,
       input.type,
       input.type === 'forward' ? input.domain_pattern : null,
       input.type === 'reverse' ? input.path_prefix : null,
-      input.type === 'reverse' ? input.upstream_url : null,
+      input.type !== 'forward' ? input.upstream_url : null,
+      assignedPort,
       input.description ?? null,
     );
   } catch (err: unknown) {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      const msg = (err as { message?: string }).message ?? '';
+      if (msg.includes('routes.port')) {
+        throw new Error(`Port ${assignedPort} is already in use`);
+      }
       throw new Error(`Route with name "${input.name}" already exists`);
     }
     throw err;
